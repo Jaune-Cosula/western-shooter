@@ -18,9 +18,12 @@ Avaa `index.html` selaimessa — tai pelaa julkaisun jälkeen GitHub Pagesissa.
 - **Rosvot:** ampu niistä → pisteitä. Kovat rosvot (huppupäinen) ja konekivääriläjät kestävät useampia osumia ja ampuvat kovempaa.
 - **Siviilit:** älä ammu (-300 pistettä) äläkä törmää (-1 elämä).
 - **Törmäykset:** törmäys rosvoon tai siviiliin vie yhden elämän; lyhyt suojattu aika sen jälkeen. Bandiittien luodit vievät kestopisteitä (HP); HP:n nollauduttua menetät elämän.
-- **Tasot:** joka 1000 pisteestä taso nousee — lisää rosvoja, nopeammin liikkeellä, kovempia aseita.
+- **Suojat:** radalle vierii tynnyreitä, puulaatikoita ja kiviä, jotka pysäyttävät sekä sinun että rosvoluodit — piiloudu niiden taakse hetkeksi pommisateelta.
+- **Tasot:** joka 1000 pisteestä taso nousee — lisää rosvoja, nopeammin liikkeellä, kovempia aseita. Ensimmäisillä tasoilla rosvot ampuvat suoraan alaspäin, myöhemmin ne tähtäävät sinuun.
 - **★-laatikko:** apulaisseriffi apuun + tuplatulivoima 12 sekunniksi.
 - **+-laatikko:** +30 HP.
+
+Vaikeustaso nousee maltillisesti: taso 1 on pidättyväinen (harvat, hitaat rosvot, lievät vahingot) ja kiristyy vasta tasojen myötä.
 
 ## Tekniikka
 

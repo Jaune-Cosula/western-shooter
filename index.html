@@ -119,9 +119,9 @@ const player = { x: W / 2 - 12, y: H - 90, w: 24, h: 30, shootCd: 0, anim: 0 };
 const deputy = { active: false, x: 0, y: 0, shootCd: 0, side: -1 };
 
 let playerBullets = [], bandits = [], civilians = [], banditBullets = [],
-    crates = [], particles = [], texts = [], bgProps = [], tumbleweeds = [];
+    crates = [], particles = [], texts = [], bgProps = [], tumbleweeds = [], covers = [];
 
-let banditTimer = 1.5, civTimer = 6, crateTimer = 12, bgTimer = 0, twTimer = 8;
+let banditTimer = 1.5, civTimer = 6, crateTimer = 12, bgTimer = 0, twTimer = 8, coverTimer = 5;
 
 function startGame() {
   game.mode = "play"; game.score = 0; game.lives = 3; game.hp = 100;
@@ -129,9 +129,9 @@ function startGame() {
   game.invulnT = 2; game.nextLevelThreshold = 1000;
   player.x = W / 2 - 12; player.y = H - 90; player.shootCd = 0;
   deputy.active = false;
-  bandits = []; civilians = []; playerBullets = []; banditBullets = [];
+  bandits = []; civilians = []; playerBullets = []; banditBullets = []; covers = [];
   crates = []; particles = []; texts = [];
-  banditTimer = 1.2; civTimer = 5; crateTimer = 12;
+  banditTimer = 2.2; civTimer = 6; crateTimer = 12; coverTimer = 4;
   beep(660, 0.1, "square", 0.08); setTimeout(() => beep(880, 0.15, "square", 0.08), 110);
 }
 
@@ -158,11 +158,11 @@ function spawnBandit() {
   const lv = game.level;
   let type = "pistol";
   const roll = Math.random();
-  if (lv >= 3 && roll < 0.12 + lv * 0.02) type = "gatling";
-  else if (lv >= 2 && roll < 0.3 + lv * 0.03) type = "shotgun";
-  const base = { pistol: { w: 22, h: 28, hp: 1, speed: 34 + lv * 7, fire: 2.4 - lv * 0.12, dmg: 10, pts: 100 },
-                 shotgun: { w: 26, h: 30, hp: 3, speed: 26 + lv * 5, fire: 2.8 - lv * 0.1, dmg: 25, pts: 150 },
-                 gatling: { w: 28, h: 30, hp: 2, speed: 30 + lv * 6, fire: 1.9 - lv * 0.1, dmg: 8, pts: 200 } }[type];
+  if (lv >= 3 && roll < 0.08 + lv * 0.02) type = "gatling";
+  else if (lv >= 2 && roll < 0.15 + lv * 0.03) type = "shotgun";
+  const base = { pistol: { w: 22, h: 28, hp: 1, speed: 28 + (lv - 1) * 7, fire: 2.9 - (lv - 1) * 0.15, dmg: 8, pts: 100 },
+                 shotgun: { w: 26, h: 30, hp: 3, speed: 22 + (lv - 1) * 5, fire: 3.2 - (lv - 1) * 0.12, dmg: 18, pts: 150 },
+                 gatling: { w: 28, h: 30, hp: 2, speed: 26 + (lv - 1) * 6, fire: 2.3 - (lv - 1) * 0.12, dmg: 6, pts: 200 } }[type];
   bandits.push({
     type, x: rand(30, W - 60), y: -40, w: base.w, h: base.h,
     hp: base.hp, speed: base.speed * rand(0.85, 1.15),
@@ -192,6 +192,15 @@ function spawnBgProp() {
 }
 function spawnTumbleweed() {
   tumbleweeds.push({ x: -30, y: rand(100, H - 200), vx: rand(60, 120), rot: 0 });
+}
+function spawnCover() {
+  const types = [
+    { kind: "barrels", w: 44, h: 22 },
+    { kind: "crate", w: 38, h: 24 },
+    { kind: "rock", w: 52, h: 20 }
+  ];
+  const t = types[randi(0, types.length - 1)];
+  covers.push({ kind: t.kind, x: rand(16, W - t.w - 16), y: -30, w: t.w, h: t.h, speed: 46 });
 }
 
 // ========== TAUSTA (western-maisema) ==========
@@ -410,6 +419,37 @@ function drawCivilian(c) {
   ctx.fillRect(x + c.w / 2 - 1, y + 9, 3, 1);
 }
 
+function drawCover(c) {
+  const x = Math.round(c.x), y = Math.round(c.y);
+  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.fillRect(x + 2, y + c.h - 3, c.w - 4, 3);
+  if (c.kind === "barrels") {
+    ctx.fillStyle = "#7a5230";
+    ctx.fillRect(x, y + 4, 20, 18); ctx.fillRect(x + 22, y + 4, 20, 18);
+    ctx.fillStyle = "#8f6236";
+    ctx.fillRect(x + 2, y + 6, 16, 14); ctx.fillRect(x + 24, y + 6, 16, 14);
+    ctx.fillStyle = "#54391f";
+    ctx.fillRect(x, y + 9, 20, 3); ctx.fillRect(x + 22, y + 9, 20, 3);
+    ctx.fillRect(x, y + 16, 20, 2); ctx.fillRect(x + 22, y + 16, 20, 2);
+  } else if (c.kind === "crate") {
+    ctx.fillStyle = "#8a6034";
+    ctx.fillRect(x, y, c.w, c.h);
+    ctx.fillStyle = "#a87844";
+    ctx.fillRect(x + 3, y + 3, c.w - 6, c.h - 6);
+    ctx.fillStyle = "#5c3d18";
+    ctx.fillRect(x, y, c.w, 3); ctx.fillRect(x, y + c.h - 3, c.w, 3);
+    ctx.fillRect(x, y, 3, c.h); ctx.fillRect(x + c.w - 3, y, 3, c.h);
+    ctx.fillRect(x + c.w / 2 - 2, y, 4, c.h);
+  } else {
+    ctx.fillStyle = "#8a7560";
+    ctx.fillRect(x, y + 6, c.w, 14);
+    ctx.fillRect(x + 6, y, c.w - 18, 8);
+    ctx.fillStyle = "#6e5c4a";
+    ctx.fillRect(x, y + 16, c.w, 4);
+    ctx.fillRect(x + 8, y + 2, 8, 3);
+  }
+}
+
 function drawCrate(c) {
   const x = Math.round(c.x), y = Math.round(c.y);
   const bob = Math.sin(game.time * 4) * 2;
@@ -525,7 +565,7 @@ function update(dt) {
   banditTimer -= dt;
   if (banditTimer <= 0) {
     spawnBandit();
-    banditTimer = Math.max(0.45, rand(1.8, 2.6) - lv * 0.18);
+    banditTimer = Math.max(0.5, rand(2.5, 3.4) - (lv - 1) * 0.2);
   }
   civTimer -= dt;
   if (civTimer <= 0) { spawnCivilian(); civTimer = rand(3.5, 7); }
@@ -535,12 +575,28 @@ function update(dt) {
   if (bgTimer <= 0) { spawnBgProp(); bgTimer = rand(0.7, 2.2); }
   twTimer -= dt;
   if (twTimer <= 0) { spawnTumbleweed(); twTimer = rand(4, 9); }
+  coverTimer -= dt;
+  if (coverTimer <= 0) {
+    if (covers.length < 3) { spawnCover(); coverTimer = rand(5, 9); }
+    else coverTimer = 2;
+  }
 
   // ===== Pelaajan luodit =====
   for (let i = playerBullets.length - 1; i >= 0; i--) {
     const b = playerBullets[i];
     b.x += (b.vx || 0) * dt; b.y += b.vy * dt;
     if (b.y < -20 || b.x < -20 || b.x > W + 20) { playerBullets.splice(i, 1); continue; }
+    // Suojat pysäyttävat myos omat luodit
+    let hitCover = false;
+    for (const cov of covers) {
+      if (aabb(b, cov)) {
+        boom(b.x + 2, b.y, "#c9b48a", 4);
+        playerBullets.splice(i, 1);
+        hitCover = true;
+        break;
+      }
+    }
+    if (hitCover) continue;
     // Osumat rosvoihin
     let hit = false;
     for (let j = bandits.length - 1; j >= 0; j--) {
@@ -617,24 +673,39 @@ function update(dt) {
       sfx.banditShoot();
       const cx = bn.x + bn.w / 2, cy = bn.y + bn.h + 4;
       const px = player.x + player.w / 2, py = player.y + player.h / 2;
-      const aim = (tx, ty, spdMul) => {
-        const dx = tx - cx, dy = ty - cy, len = Math.hypot(dx, dy) || 1;
-        const bs = (200 + game.level * 10) * spdMul;
-        banditBullets.push({ x: cx, y: cy, w: 5, h: 5, vx: dx / len * bs, vy: dy / len * bs, dmg: bn.dmg });
+      const straight = game.level <= 2;
+      const bull = (tx, ty, sxOff, spdMul) => {
+        const sx = cx + (sxOff || 0);
+        let vx = 0;
+        let vy = (190 + (game.level - 1) * 12) * (spdMul || 1);
+        if (tx !== null) {
+          const dx = tx - sx, dy = ty - cy, len = Math.hypot(dx, dy) || 1;
+          vx = dx / len * vy; vy = dy / len * vy;
+        }
+        banditBullets.push({ x: sx, y: cy, w: 5, h: 5, vx, vy, dmg: bn.dmg });
       };
       if (bn.type === "shotgun") {
-        aim(px - 40, py, 0.85); aim(px, py, 0.85); aim(px + 40, py, 0.85);
+        if (straight) { bull(null, 0, -26); bull(null, 0, 0); bull(null, 0, 26); }
+        else { bull(px - 40, py, 0, 0.85); bull(px, py, 0, 0.85); bull(px + 40, py, 0, 0.85); }
       } else if (bn.type === "gatling") {
-        aim(px + rand(-30, 30), py, 0.95);
+        if (straight) bull(null, 0, rand(-10, 10));
+        else bull(px + rand(-30, 30), py, 0, 0.95);
         setTimeout(() => { if (game.mode === "play" && bandits.includes(bn)) sfx.banditShoot(); }, 120);
         setTimeout(() => {
-          if (game.mode === "play" && bandits.includes(bn)) aim(px + rand(-30, 30), py, 0.95);
+          if (game.mode === "play" && bandits.includes(bn)) {
+            if (straight) bull(null, 0, rand(-10, 10));
+            else bull(px + rand(-30, 30), py, 0, 0.95);
+          }
         }, 130);
         setTimeout(() => {
-          if (game.mode === "play" && bandits.includes(bn)) aim(px + rand(-30, 30), py, 0.95);
+          if (game.mode === "play" && bandits.includes(bn)) {
+            if (straight) bull(null, 0, rand(-10, 10));
+            else bull(px + rand(-30, 30), py, 0, 0.95);
+          }
         }, 260);
       } else {
-        aim(px + rand(-12, 12), py, 1);
+        if (straight) bull(null);
+        else bull(px + rand(-12, 12), py, 0);
       }
     }
     // Törmäys pelaajaan
@@ -652,6 +723,17 @@ function update(dt) {
     const b = banditBullets[i];
     b.x += b.vx * dt; b.y += b.vy * dt;
     if (b.y > H + 20 || b.y < -20 || b.x < -20 || b.x > W + 20) { banditBullets.splice(i, 1); continue; }
+    // Suojat pysäyttävät rosvoluodit
+    let blocked = false;
+    for (const cov of covers) {
+      if (aabb(b, cov)) {
+        boom(b.x, b.y, "#c9b48a", 5);
+        banditBullets.splice(i, 1);
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) continue;
     if (game.invulnT <= 0 && aabb(b, player)) {
       banditBullets.splice(i, 1);
       game.hp -= b.dmg;
@@ -678,6 +760,12 @@ function update(dt) {
       continue;
     }
     if (c.y > H + 40) civilians.splice(i, 1);
+  }
+
+  // ===== Suojat =====
+  for (let i = covers.length - 1; i >= 0; i--) {
+    covers[i].y += covers[i].speed * dt;
+    if (covers[i].y > H + 40) covers.splice(i, 1);
   }
 
   // ===== Laatikot =====
@@ -805,8 +893,9 @@ function drawMenu() {
   ctx.fillText("Ampuu rosvot → pisteitä", W / 2, 340);
   ctx.fillText("Älä ammu siviilejä (-300 pistettä)", W / 2, 360);
   ctx.fillText("Älä törmää keneenkään (-1 elämä)", W / 2, 380);
-  ctx.fillText("★★-laatikko = apulaisseriffi + tuplatulivoima", W / 2, 400);
-  ctx.fillText("+ -laatikko = parannus +30 HP", W / 2, 420);
+  ctx.fillText("Tynnyrit, puulaatikot ja kivet suojaavat luoteilta - piiloudu taakse!", W / 2, 400);
+  ctx.fillText("★-laatikko = apulaisseriffi + tuplatulivoima", W / 2, 420);
+  ctx.fillText("+ -laatikko = parannus +30 HP", W / 2, 440);
   ctx.fillStyle = "#ffd700";
   ctx.font = "bold 18px monospace";
   ctx.globalAlpha = 0.6 + 0.4 * Math.sin(game.time * 4);
@@ -851,6 +940,7 @@ function frame(now) {
   if (game.mode === "menu") { drawMenu(); ctx.restore(); requestAnimationFrame(frame); return; }
 
   crates.forEach(drawCrate);
+  covers.forEach(drawCover);
   civilians.forEach(drawCivilian);
   bandits.forEach(drawBandit);
   drawDeputy();

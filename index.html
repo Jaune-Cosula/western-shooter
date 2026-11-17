@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Villin Lännen Revolverisankari</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #1a0f08;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Courier New", monospace;
+    overflow: hidden;
+  }
+  #wrap { position: relative; }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #2b1b10;
+    box-shadow: 0 0 40px rgba(0,0,0,0.8), 0 0 120px rgba(255,140,40,0.15);
+    border: 4px solid #3d2a18;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="480" height="640"></canvas></div>
+<script>
+"use strict";
+
+// ---------- Perusasetukset ----------
+const W = 480, H = 640;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+function fitCanvas() {
+  const scale = Math.min(window.innerWidth / (W + 24), window.innerHeight / (H + 24));
+  canvas.style.width = Math.floor(W * scale) + "px";
+  canvas.style.height = Math.floor(H * scale) + "px";
+}
+window.addEventListener("resize", fitCanvas);
+fitCanvas();
+
+// ---------- Apufunktiot ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function aabb(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// ---------- Äänet (WebAudio, ei tiedostoja) ----------
+let audioCtx = null;
+function ac() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  return audioCtx;
+}
+function beep(freq, dur, type, vol, slide) {
+  const a = ac(); if (!a) return;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || "square";
+  o.frequency.setValueAtTime(freq, a.currentTime);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), a.currentTime + dur);
+  g.gain.setValueAtTime(vol || 0.08, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(); o.stop(a.currentTime + dur);
+}
+function noise(dur, vol) {
+  const a = ac(); if (!a) return;
+  const buf = a.createBuffer(1, a.sampleRate * dur, a.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  const src = a.createBufferSource(); src.buffer = buf;
+  const g = a.createGain(); g.gain.value = vol || 0.12;
+  src.connect(g); g.connect(a.destination); src.start();
+}
+const sfx = {
+  shoot: () => beep(880, 0.08, "square", 0.05, 220),
+  banditShoot: () => beep(300, 0.12, "sawtooth", 0.04, 120),
+  hit: () => { beep(160, 0.1, "square", 0.07, 60); },
+  explode: () => { noise(0.25, 0.15); beep(90, 0.25, "triangle", 0.08, 40); },
+  hurt: () => { beep(140, 0.25, "sawtooth", 0.1, 50); noise(0.15, 0.1); },
+  powerup: () => { beep(520, 0.09, "square", 0.08); setTimeout(() => beep(660, 0.09, "square", 0.08), 90); setTimeout(() => beep(880, 0.14, "square", 0.08), 180); },
+  heal: () => { beep(440, 0.1, "triangle", 0.09); setTimeout(() => beep(660, 0.16, "triangle", 0.09), 100); },
+  penalty: () => { beep(220, 0.3, "sawtooth", 0.1, 80); },
+  levelup: () => { beep(523, 0.1, "square", 0.07); setTimeout(() => beep(659, 0.1, "square", 0.07), 100); setTimeout(() => beep(784, 0.2, "square", 0.07), 200); },
+  gameover: () => { beep(300, 0.4, "sawtooth", 0.1, 60); setTimeout(() => beep(200, 0.5, "sawtooth", 0.1, 40), 350); }
+};
+
+// ---------- Syöte ----------
+const keys = {};
+window.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+  if (e.code === "KeyP" && game.mode === "play") game.mode = "pause";
+  else if (e.code === "KeyP" && game.mode === "pause") game.mode = "play";
+  if (e.code === "Enter") {
+    if (game.mode === "menu" || game.mode === "gameover") startGame();
+  }
+});
+window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+// ---------- Pelitila ----------
+const game = {
+  mode: "menu",
+  score: 0, lives: 3, hp: 100, maxHp: 100, level: 1,
+  time: 0,
+  doubleFireT: 0, deputyT: 0,
+  invulnT: 0,
+  shakeT: 0, flashT: 0,
+  nextLevelThreshold: 1000
+};
+
+const player = { x: W / 2 - 12, y: H - 90, w: 24, h: 30, shootCd: 0, anim: 0 };
+const deputy = { active: false, x: 0, y: 0, shootCd: 0, side: -1 };
+
+let playerBullets = [], bandits = [], civilians = [], banditBullets = [],
+    crates = [], particles = [], texts = [], bgProps = [], tumbleweeds = [];
+
+let banditTimer = 1.5, civTimer = 6, crateTimer = 12, bgTimer = 0, twTimer = 8;
+
+function startGame() {
+  game.mode = "play"; game.score = 0; game.lives = 3; game.hp = 100;
+  game.level = 1; game.time = 0; game.doubleFireT = 0; game.deputyT = 0;
+  game.invulnT = 2; game.nextLevelThreshold = 1000;
+  player.x = W / 2 - 12; player.y = H - 90; player.shootCd = 0;
+  deputy.active = false;
+  bandits = []; civilians = []; playerBullets = []; banditBullets = [];
+  crates = []; particles = []; texts = [];
+  banditTimer = 1.2; civTimer = 5; crateTimer = 12;
+  beep(660, 0.1, "square", 0.08); setTimeout(() => beep(880, 0.15, "square", 0.08), 110);
+}
+
+function levelUp() {
+  game.level++;
+  game.nextLevelThreshold += 1000;
+  sfx.levelup();
+  addText(W / 2, H / 2 - 40, "TASO " + game.level + "!", "#ffd700", 2, 34);
+}
+
+// ---------- Tekstien & hiukkasten hallinta ----------
+function addText(x, y, text, color, scale, size) {
+  texts.push({ x, y, text, color: color || "#fff", life: 1.2, scale: scale || 1, size: size || 16 });
+}
+function boom(x, y, color, n) {
+  for (let i = 0; i < (n || 14); i++) {
+    const a = rand(0, Math.PI * 2), sp = rand(30, 160);
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rand(0.3, 0.8), color: color || "#ff8c1a", size: randi(2, 4) });
+  }
+}
+
+// ---------- Spawnaus ----------
+function spawnBandit() {
+  const lv = game.level;
+  let type = "pistol";
+  const roll = Math.random();
+  if (lv >= 3 && roll < 0.12 + lv * 0.02) type = "gatling";
+  else if (lv >= 2 && roll < 0.3 + lv * 0.03) type = "shotgun";
+  const base = { pistol: { w: 22, h: 28, hp: 1, speed: 34 + lv * 7, fire: 2.4 - lv * 0.12, dmg: 10, pts: 100 },
+                 shotgun: { w: 26, h: 30, hp: 3, speed: 26 + lv * 5, fire: 2.8 - lv * 0.1, dmg: 25, pts: 150 },
+                 gatling: { w: 28, h: 30, hp: 2, speed: 30 + lv * 6, fire: 1.9 - lv * 0.1, dmg: 8, pts: 200 } }[type];
+  bandits.push({
+    type, x: rand(30, W - 60), y: -40, w: base.w, h: base.h,
+    hp: base.hp, speed: base.speed * rand(0.85, 1.15),
+    fireCd: rand(0.8, 1.8), fireInterval: Math.max(0.55, base.fire),
+    dmg: base.dmg, pts: base.pts, targetY: rand(70, 240),
+    sway: rand(0, Math.PI * 2), swaySpeed: rand(0.8, 1.6), anim: 0, hurtT: 0
+  });
+}
+function spawnCivilian() {
+  civilians.push({
+    x: rand(30, W - 60), y: -30, w: 20, h: 28,
+    speed: rand(26, 44), sway: rand(0, Math.PI * 2),
+    swaySpeed: rand(0.6, 1.2), fleeT: 0, anim: 0, kind: randi(0, 2)
+  });
+}
+function spawnCrate() {
+  let type = "bonus";
+  if (game.hp < game.maxHp * 0.6 && Math.random() < 0.55) type = "health";
+  else if (game.deputyT > 0) type = "health";
+  crates.push({ type, x: rand(40, W - 64), y: -30, w: 24, h: 22, speed: rand(40, 60), sway: rand(0, Math.PI * 2) });
+}
+function spawnBgProp() {
+  const kinds = ["cactus", "rock", "skull", "barrel", "sign"];
+  const k = kinds[randi(0, kinds.length - 1)];
+  const side = Math.random() < 0.5;
+  bgProps.push({ kind: k, x: side ? rand(14, 70) : rand(W - 80, W - 34), y: -50, speedFactor: rand(0.9, 1.1) });
+}
+function spawnTumbleweed() {
+  tumbleweeds.push({ x: -30, y: rand(100, H - 200), vx: rand(60, 120), rot: 0 });
+}
+
+// ========== TAUSTA (western-maisema) ==========
+const bgLayers = [];
+for (let i = 0; i < 3; i++) bgLayers.push({ offset: 0 });
+
+function drawBackground(dt) {
+  // Taivas (auringonlasku)
+  const grd = ctx.createLinearGradient(0, 0, 0, H * 0.45);
+  grd.addColorStop(0, "#2c1650");
+  grd.addColorStop(0.35, "#8a3b52");
+  grd.addColorStop(0.7, "#d97a3a");
+  grd.addColorStop(1, "#f2b25c");
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, W, H * 0.45);
+
+  // Aurinko
+  ctx.fillStyle = "#ffe9a0";
+  ctx.fillRect(300, 90, 44, 44);
+  ctx.fillStyle = "#ffd268";
+  ctx.fillRect(304, 94, 36, 36);
+  // Auringonsäteet (piirretty ruutukaavalla)
+  ctx.fillStyle = "rgba(255,220,140,0.25)";
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4 + game.time * 0.1;
+    ctx.fillRect(322 + Math.cos(a) * 34, 112 + Math.sin(a) * 34, 4, 4);
+  }
+
+  // Kaukaiset vuoret / mesat (hitain parallaksi)
+  const mesaColors = ["#5d2f43", "#7a3b3e", "#934b3a"];
+  bgLayers.forEach((l, i) => {
+    const speed = [6, 10, 16][i];
+    l.offset = (l.offset + speed * dt) % 160;
+    ctx.fillStyle = mesaColors[i];
+    const yBase = H * 0.45 - i * 10;
+    for (let x = -160 + l.offset; x < W + 160; x += 160) {
+      const mw = 90 + i * 12, mh = 40 + i * 14;
+      ctx.fillRect(x, yBase - mh, mw, mh);
+      ctx.fillRect(x + 18, yBase - mh - 8 - i * 4, mw - 36, 10 + i * 4);
+    }
+  });
+
+  // Maa (hiekka) – rullaa alaspäin
+  ctx.fillStyle = "#c68e4f";
+  ctx.fillRect(0, H * 0.45, W, H);
+  const scroll = (game.time * 46) % 32;
+  // Vaaleammat raidat liikkeessä
+  ctx.fillStyle = "#b87f43";
+  for (let y = -32 + scroll; y < H; y += 32) {
+    if (y > H * 0.45 - 32) ctx.fillRect(0, y, W, 16);
+  }
+  // Hiekan pilkut
+  ctx.fillStyle = "rgba(0,0,0,0.08)";
+  for (let y = -32 + scroll; y < H; y += 32) {
+    for (let x = 0; x < W; x += 48) {
+      const off = ((x * 7 + y * 13) % 37);
+      ctx.fillRect(x + off, y + 6 + off % 12, 3, 2);
+    }
+  }
+  // Pölypolut
+  ctx.fillStyle = "rgba(160,110,60,0.5)";
+  for (let y = -64 + scroll; y < H; y += 64) {
+    ctx.fillRect(150, y, 130, 40);
+    ctx.fillRect(60, y + 32, 90, 26);
+    ctx.fillRect(300, y + 20, 110, 34);
+  }
+
+  // Puiden / rakennusten siluetti kaukana
+  ctx.fillStyle = "#4a2c3b";
+  const townOff = (game.time * 24) % 480;
+  for (let x = -480 + townOff; x < W + 480; x += 480) {
+    ctx.fillRect(x + 60, H * 0.45 - 30, 70, 30);
+    ctx.fillRect(x + 130, H * 0.45 - 22, 50, 22);
+    ctx.fillRect(x + 64, H * 0.45 - 40, 10, 12);
+    ctx.fillRect(x + 118, H * 0.45 - 38, 8, 10);
+  }
+}
+
+function drawBgProps() {
+  bgProps.forEach(p => {
+    const x = p.x, y = p.y;
+    if (p.kind === "cactus") {
+      ctx.fillStyle = "#3d7a3a";
+      ctx.fillRect(x, y - 24, 8, 30);
+      ctx.fillRect(x - 7, y - 16, 7, 5); ctx.fillRect(x - 7, y - 22, 4, 8);
+      ctx.fillRect(x + 8, y - 12, 7, 5); ctx.fillRect(x + 11, y - 20, 4, 10);
+      ctx.fillStyle = "#2c5c2b"; ctx.fillRect(x + 2, y - 24, 2, 30);
+    } else if (p.kind === "rock") {
+      ctx.fillStyle = "#8a7560";
+      ctx.fillRect(x, y - 8, 18, 8); ctx.fillRect(x + 3, y - 12, 12, 4);
+      ctx.fillStyle = "#6e5c4a"; ctx.fillRect(x, y - 2, 18, 2);
+    } else if (p.kind === "skull") {
+      ctx.fillStyle = "#e8dcc0";
+      ctx.fillRect(x, y - 6, 10, 7);
+      ctx.fillStyle = "#3a2c20";
+      ctx.fillRect(x + 2, y - 4, 2, 2); ctx.fillRect(x + 6, y - 4, 2, 2);
+    } else if (p.kind === "barrel") {
+      ctx.fillStyle = "#7a5230";
+      ctx.fillRect(x, y - 14, 14, 14);
+      ctx.fillStyle = "#54391f"; ctx.fillRect(x, y - 11, 14, 3); ctx.fillRect(x, y - 5, 14, 3);
+    } else {
+      ctx.fillStyle = "#6e4a28"; ctx.fillRect(x + 6, y - 4, 3, 12);
+      ctx.fillStyle = "#c9b48a"; ctx.fillRect(x, y - 14, 16, 10);
+      ctx.fillStyle = "#7a5a3a"; ctx.fillRect(x + 2, y - 12, 12, 2); ctx.fillRect(x + 2, y - 8, 8, 2);
+    }
+  });
+  tumbleweeds.forEach(t => {
+    ctx.save();
+    ctx.translate(t.x + 10, t.y + 10);
+    ctx.rotate(t.rot);
+    ctx.fillStyle = "#a08350";
+    ctx.fillRect(-8, -8, 16, 2); ctx.fillRect(-8, 6, 16, 2);
+    ctx.fillRect(-8, -8, 2, 16); ctx.fillRect(6, -8, 2, 16);
+    ctx.fillRect(-6, -6, 12, 2); ctx.fillRect(-6, 4, 12, 2);
+    ctx.fillRect(-2, -8, 2, 16);
+    ctx.restore();
+  });
+}
+
+// ========== HAHMOJEN PIIRTO ==========
+function drawPlayer() {
+  if (game.invulnT > 0 && Math.floor(game.time * 12) % 2 === 0) return;
+  const x = Math.round(player.x), y = Math.round(player.y);
+  const walking = (Math.abs(player.vx) > 1 || Math.abs(player.vy) > 1) && game.mode === "play";
+  const step = walking ? Math.floor(player.anim * 8) % 2 : 0;
+
+  // Varjo
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(x + 2, y + 28, 20, 3);
+
+  // Poncho
+  ctx.fillStyle = "#a03028";
+  ctx.fillRect(x + 5, y + 12, 14, 10);
+  ctx.fillStyle = "#7a2018";
+  ctx.fillRect(x + 5, y + 18, 14, 4);
+  // Jalat
+  ctx.fillStyle = "#3a2a1a";
+  if (step === 0) { ctx.fillRect(x + 6, y + 22, 5, 7); ctx.fillRect(x + 13, y + 22, 5, 6); }
+  else { ctx.fillRect(x + 6, y + 22, 5, 6); ctx.fillRect(x + 13, y + 22, 5, 7); }
+  // Pää
+  ctx.fillStyle = "#e0b088";
+  ctx.fillRect(x + 8, y + 6, 8, 7);
+  ctx.fillStyle = "#3a2a1a";
+  ctx.fillRect(x + 9, y + 9, 2, 2); ctx.fillRect(x + 13, y + 9, 2, 2);
+  // Hattu
+  ctx.fillStyle = "#5a3a1a";
+  ctx.fillRect(x + 4, y + 4, 16, 3);
+  ctx.fillRect(x + 7, y, 10, 5);
+  // Revolveri
+  ctx.fillStyle = "#4a4a52";
+  ctx.fillRect(x + 18, y + 12, 7, 3);
+  ctx.fillRect(x + 18, y + 14, 3, 4);
+  if (game.doubleFireT > 0) {
+    ctx.fillStyle = "#4a4a52";
+    ctx.fillRect(x - 1, y + 12, 7, 3);
+  }
+}
+
+function drawBandit(b) {
+  const x = Math.round(b.x), y = Math.round(b.y);
+  const flash = b.hurtT > 0 && Math.floor(b.hurtT * 20) % 2 === 0;
+  ctx.fillStyle = "rgba(0,0,0,0.25)";
+  ctx.fillRect(x + 2, y + b.h - 2, b.w - 4, 3);
+  // Keho
+  ctx.fillStyle = flash ? "#ffffff" : (b.type === "gatling" ? "#4a3a5c" : b.type === "shotgun" ? "#3d3d3d" : "#5c4033");
+  ctx.fillRect(x + 5, y + 11, b.w - 10, 10);
+  // Pää + naamio
+  ctx.fillStyle = flash ? "#ffffff" : "#c89468";
+  ctx.fillRect(x + b.w / 2 - 4, y + 5, 8, 7);
+  ctx.fillStyle = flash ? "#cccccc" : "#2a2a2a";
+  ctx.fillRect(x + b.w / 2 - 4, y + 8, 8, 3);
+  // Hattu (musta)
+  ctx.fillStyle = flash ? "#dddddd" : "#1a1a1a";
+  ctx.fillRect(x + 2, y + 3, b.w - 4, 3);
+  ctx.fillRect(x + b.w / 2 - 5, y - 1, 10, 5);
+  // Jalat
+  ctx.fillStyle = flash ? "#cccccc" : "#2c2018";
+  ctx.fillRect(x + 6, y + 21, 5, 7);
+  ctx.fillRect(x + b.w - 11, y + 21, 5, 7);
+  // Ase
+  ctx.fillStyle = "#3a3a42";
+  if (b.type === "gatling") {
+    ctx.fillRect(x + b.w - 2, y + 13, 10, 5);
+    ctx.fillRect(x + b.w + 4, y + 12, 4, 7);
+  } else if (b.type === "shotgun") {
+    ctx.fillRect(x + b.w - 2, y + 12, 11, 4);
+  } else {
+    ctx.fillRect(x + b.w - 2, y + 13, 8, 3);
+  }
+  // Osumapistepalkki isommille rosvolle
+  if (b.hp > 1) {
+    ctx.fillStyle = "#300"; ctx.fillRect(x, y - 6, b.w, 3);
+    ctx.fillStyle = "#e33"; ctx.fillRect(x, y - 6, b.w * (b.hp / (b.type === "shotgun" ? 3 : 2)), 3);
+  }
+}
+
+function drawCivilian(c) {
+  const x = Math.round(c.x), y = Math.round(c.y);
+  const dress = ["#c77ba0", "#7b9cc7", "#d1a95c"][c.kind];
+  const hat = ["#5c3a2a", "#3a3a5c", "#8a6a3a"][c.kind];
+  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.fillRect(x + 2, y + c.h - 2, c.w - 4, 3);
+  // Mekko
+  ctx.fillStyle = dress;
+  ctx.fillRect(x + 5, y + 10, c.w - 10, 8);
+  ctx.fillRect(x + 3, y + 16, c.w - 6, 6);
+  // Pää
+  ctx.fillStyle = "#e8bb96";
+  ctx.fillRect(x + c.w / 2 - 3, y + 5, 7, 6);
+  // Hattu / hiukset
+  ctx.fillStyle = hat;
+  ctx.fillRect(x + 1, y + 3, c.w - 2, 3);
+  ctx.fillRect(x + c.w / 2 - 4, y, 9, 4);
+  // Huuli
+  ctx.fillStyle = "#a04848";
+  ctx.fillRect(x + c.w / 2 - 1, y + 9, 3, 1);
+}
+
+function drawCrate(c) {
+  const x = Math.round(c.x), y = Math.round(c.y);
+  const bob = Math.sin(game.time * 4) * 2;
+  const yy = y + bob;
+  if (c.type === "bonus") {
+    ctx.fillStyle = "#8a5c28"; ctx.fillRect(x, yy, 24, 22);
+    ctx.fillStyle = "#a87434"; ctx.fillRect(x + 2, yy + 2, 20, 18);
+    ctx.fillStyle = "#5c3d18"; ctx.fillRect(x, yy + 9, 24, 4);
+    ctx.fillStyle = "#ffd700"; ctx.fillRect(x + 8, yy + 4, 8, 6); ctx.fillRect(x + 10, yy + 14, 4, 5);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 8px monospace"; ctx.fillText("★", x + 9, yy + 9);
+  } else {
+    ctx.fillStyle = "#c8c8d0"; ctx.fillRect(x, yy, 24, 22);
+    ctx.fillStyle = "#e8e8f0"; ctx.fillRect(x + 2, yy + 2, 20, 18);
+    ctx.fillStyle = "#c33"; ctx.fillRect(x + 9, yy + 5, 6, 12); ctx.fillRect(x + 6, yy + 8, 12, 6);
+  }
+}
+
+function drawDeputy() {
+  if (!deputy.active) return;
+  const x = Math.round(deputy.x), y = Math.round(deputy.y);
+  ctx.save();
+  if (Math.floor(game.time * 20) % 3 === 0) ctx.globalAlpha = 0.75;
+  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.fillRect(x + 2, y + 26, 16, 3);
+  ctx.fillStyle = "#2f5c8a"; // seriffin sininen takki
+  ctx.fillRect(x + 4, y + 11, 12, 10);
+  ctx.fillStyle = "#e0b088";
+  ctx.fillRect(x + 6, y + 5, 7, 6);
+  ctx.fillStyle = "#2a2a2a";
+  ctx.fillRect(x + 7, y + 8, 2, 2); ctx.fillRect(x + 10, y + 8, 2, 2);
+  ctx.fillStyle = "#6e4a28";
+  ctx.fillRect(x + 3, y + 3, 12, 3);
+  ctx.fillRect(x + 5, y, 8, 4);
+  ctx.fillStyle = "#e8c14a"; // tähti
+  ctx.fillRect(x + 8, y + 13, 4, 4);
+  ctx.fillStyle = "#3a3a42";
+  ctx.fillRect(x + 15, y + 12, 7, 3);
+  ctx.restore();
+}
+
+// ========== PÄIVITYS ==========
+function update(dt) {
+  game.time += dt;
+  if (game.mode === "menu") {
+    for (let i = bgProps.length - 1; i >= 0; i--) {
+      bgProps[i].y += 46 * dt;
+      if (bgProps[i].y > H + 40) bgProps.splice(i, 1);
+    }
+    for (let i = tumbleweeds.length - 1; i >= 0; i--) {
+      const t = tumbleweeds[i];
+      t.x += t.vx * dt; t.rot += dt * 4;
+      if (t.x > W + 40) tumbleweeds.splice(i, 1);
+    }
+    bgTimer -= dt;
+    if (bgTimer <= 0) { spawnBgProp(); bgTimer = rand(0.7, 2.2); }
+    return;
+  }
+  if (game.mode !== "play") return;
+
+  // Ajastimet
+  if (game.invulnT > 0) game.invulnT -= dt;
+  if (game.doubleFireT > 0) game.doubleFireT -= dt;
+  if (game.deputyT > 0) { game.deputyT -= dt; if (game.deputyT <= 0) deputy.active = false; }
+  if (game.shakeT > 0) game.shakeT -= dt;
+  if (game.flashT > 0) game.flashT -= dt;
+
+  // ===== Pelaajan liike =====
+  const spd = 220;
+  player.vx = 0; player.vy = 0;
+  if (keys["ArrowLeft"] || keys["KeyA"]) player.vx = -spd;
+  if (keys["ArrowRight"] || keys["KeyD"]) player.vx = spd;
+  if (keys["ArrowUp"] || keys["KeyW"]) player.vy = -spd;
+  if (keys["ArrowDown"] || keys["KeyS"]) player.vy = spd;
+  player.x = clamp(player.x + player.vx * dt, 6, W - player.w - 6);
+  player.y = clamp(player.y + player.vy * dt, H * 0.45, H - player.h - 12);
+  if (player.vx || player.vy) player.anim += dt;
+
+  // ===== Ampuminen =====
+  player.shootCd -= dt;
+  if (keys["Space"] && player.shootCd <= 0) {
+    const cd = game.doubleFireT > 0 ? 0.16 : 0.3;
+    player.shootCd = cd;
+    sfx.shoot();
+    if (game.doubleFireT > 0) {
+      playerBullets.push({ x: player.x + 2, y: player.y, w: 4, h: 10, vy: -560, dmg: 1 });
+      playerBullets.push({ x: player.x + player.w - 6, y: player.y, w: 4, h: 10, vy: -560, dmg: 1 });
+    } else {
+      playerBullets.push({ x: player.x + player.w - 7, y: player.y, w: 4, h: 10, vy: -560, dmg: 1 });
+    }
+  }
+
+  // Apulaisseriffin ampuminen (automaattinen)
+  if (deputy.active) {
+    deputy.y += (player.y - deputy.y) * Math.min(1, dt * 6);
+    const targetX = player.x + (deputy.side < 0 ? -40 : player.w + 16);
+    deputy.x += (clamp(targetX, 6, W - 30) - deputy.x) * Math.min(1, dt * 4);
+    deputy.shootCd -= dt;
+    if (deputy.shootCd <= 0 && bandits.length > 0) {
+      const t = bandits.reduce((best, b) => (!best || b.y < best.y) ? b : best, null);
+      if (t && t.y > 0) {
+        deputy.shootCd = 0.45;
+        sfx.shoot();
+        const dx = (t.x + t.w / 2) - (deputy.x + 10), dy = (t.y + t.h / 2) - deputy.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const bs = 420;
+        playerBullets.push({ x: deputy.x + 18, y: deputy.y, w: 4, h: 8, vy: (dy / len) * bs, vx: (dx / len) * bs, dmg: 1 });
+      }
+    }
+  }
+
+  // ===== Spawnaus =====
+  const lv = game.level;
+  banditTimer -= dt;
+  if (banditTimer <= 0) {
+    spawnBandit();
+    banditTimer = Math.max(0.45, rand(1.8, 2.6) - lv * 0.18);
+  }
+  civTimer -= dt;
+  if (civTimer <= 0) { spawnCivilian(); civTimer = rand(3.5, 7); }
+  crateTimer -= dt;
+  if (crateTimer <= 0) { spawnCrate(); crateTimer = rand(11, 17); }
+  bgTimer -= dt;
+  if (bgTimer <= 0) { spawnBgProp(); bgTimer = rand(0.7, 2.2); }
+  twTimer -= dt;
+  if (twTimer <= 0) { spawnTumbleweed(); twTimer = rand(4, 9); }
+
+  // ===== Pelaajan luodit =====
+  for (let i = playerBullets.length - 1; i >= 0; i--) {
+    const b = playerBullets[i];
+    b.x += (b.vx || 0) * dt; b.y += b.vy * dt;
+    if (b.y < -20 || b.x < -20 || b.x > W + 20) { playerBullets.splice(i, 1); continue; }
+    // Osumat rosvoihin
+    let hit = false;
+    for (let j = bandits.length - 1; j >= 0; j--) {
+      const bn = bandits[j];
+      if (aabb(b, { x: bn.x, y: bn.y, w: bn.w, h: bn.h })) {
+        bn.hp -= b.dmg; bn.hurtT = 0.15; hit = true;
+        if (bn.hp <= 0) {
+          boom(bn.x + bn.w / 2, bn.y + bn.h / 2, "#ff8c1a");
+          sfx.explode();
+          const pts = bn.pts + game.level * 10;
+          game.score += pts;
+          addText(bn.x, bn.y, "+" + pts, "#ffd700");
+          bandits.splice(j, 1);
+        } else { sfx.hit(); }
+        break;
+      }
+    }
+    if (hit) { playerBullets.splice(i, 1); continue; }
+    // Osumat laatikoihin
+    for (let j = crates.length - 1; j >= 0; j--) {
+      const c = crates[j];
+      if (aabb(b, c)) {
+        crates.splice(j, 1);
+        boom(c.x + 12, c.y + 10, c.type === "bonus" ? "#ffd700" : "#66ccff", 18);
+        if (c.type === "bonus") {
+          sfx.powerup();
+          game.doubleFireT = 12; game.deputyT = 12;
+          deputy.active = true; deputy.side = Math.random() < 0.5 ? -1 : 1;
+          deputy.x = player.x + (deputy.side < 0 ? -40 : player.w + 16); deputy.y = player.y;
+          addText(c.x, c.y, "APULAIS-SERIFFI!", "#ffd700", 1, 20);
+          addText(c.x, c.y + 24, "TULIVOIMA 2x", "#ff9c1a", 1, 18);
+        } else {
+          sfx.heal();
+          game.hp = Math.min(game.maxHp, game.hp + 30);
+          addText(c.x, c.y, "+30 HP", "#5cd65c");
+        }
+        playerBullets.splice(i, 1);
+        break;
+      }
+    }
+    // Osumat siviileihin → iso rangaistus
+    if (i < playerBullets.length && playerBullets[i] === b) {
+      for (const c of civilians) {
+        if (aabb(b, { x: c.x, y: c.y, w: c.w, h: c.h })) {
+          game.score = Math.max(0, game.score - 300);
+          sfx.penalty();
+          addText(c.x - 20, c.y, "AMPUIT SIVILILIN! -300", "#ff4444", 1, 18);
+          c.fleeT = 3;
+          game.flashT = 0.25;
+          playerBullets.splice(i, 1);
+          break;
+        }
+      }
+    }
+  }
+
+  // ===== Rosvot =====
+  for (let i = bandits.length - 1; i >= 0; i--) {
+    const bn = bandits[i];
+    if (bn.hurtT > 0) bn.hurtT -= dt;
+    bn.anim += dt;
+    if (bn.y < bn.targetY) {
+      bn.y += bn.speed * dt;
+    } else {
+      bn.sway += bn.swaySpeed * dt;
+      bn.x += Math.sin(bn.sway) * 50 * dt;
+      bn.y += 6 * dt; // hiipii hitaasti alas
+    }
+    bn.x = clamp(bn.x, 8, W - bn.w - 8);
+    // Ampuminen
+    bn.fireCd -= dt;
+    if (bn.fireCd <= 0 && bn.y > 10 && bn.y < H - 140) {
+      bn.fireCd = bn.fireInterval * rand(0.8, 1.2);
+      sfx.banditShoot();
+      const cx = bn.x + bn.w / 2, cy = bn.y + bn.h + 4;
+      const px = player.x + player.w / 2, py = player.y + player.h / 2;
+      const aim = (tx, ty, spdMul) => {
+        const dx = tx - cx, dy = ty - cy, len = Math.hypot(dx, dy) || 1;
+        const bs = (200 + game.level * 10) * spdMul;
+        banditBullets.push({ x: cx, y: cy, w: 5, h: 5, vx: dx / len * bs, vy: dy / len * bs, dmg: bn.dmg });
+      };
+      if (bn.type === "shotgun") {
+        aim(px - 40, py, 0.85); aim(px, py, 0.85); aim(px + 40, py, 0.85);
+      } else if (bn.type === "gatling") {
+        aim(px + rand(-30, 30), py, 0.95);
+        setTimeout(() => { if (game.mode === "play" && bandits.includes(bn)) sfx.banditShoot(); }, 120);
+        setTimeout(() => {
+          if (game.mode === "play" && bandits.includes(bn)) aim(px + rand(-30, 30), py, 0.95);
+        }, 130);
+        setTimeout(() => {
+          if (game.mode === "play" && bandits.includes(bn)) aim(px + rand(-30, 30), py, 0.95);
+        }, 260);
+      } else {
+        aim(px + rand(-12, 12), py, 1);
+      }
+    }
+    // Törmäys pelaajaan
+    if (game.invulnT <= 0 && aabb(player, bn)) {
+      loseLife("TÖRMÄYS ROSVOON!");
+      boom(bn.x + bn.w / 2, bn.y + bn.h / 2, "#ff5533", 20);
+      bandits.splice(i, 1);
+      continue;
+    }
+    if (bn.y > H + 40) bandits.splice(i, 1);
+  }
+
+  // ===== Rosvojen luodit =====
+  for (let i = banditBullets.length - 1; i >= 0; i--) {
+    const b = banditBullets[i];
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.y > H + 20 || b.y < -20 || b.x < -20 || b.x > W + 20) { banditBullets.splice(i, 1); continue; }
+    if (game.invulnT <= 0 && aabb(b, player)) {
+      banditBullets.splice(i, 1);
+      game.hp -= b.dmg;
+      sfx.hurt();
+      game.shakeT = 0.25; game.flashT = 0.2;
+      boom(b.x, b.y, "#ff3333", 6);
+      addText(player.x, player.y - 10, "-" + b.dmg + " HP", "#ff6644");
+      if (game.hp <= 0) { game.hp = game.maxHp; loseLife("OSUIT!"); }
+      continue;
+    }
+  }
+
+  // ===== Siviilit =====
+  for (let i = civilians.length - 1; i >= 0; i--) {
+    const c = civilians[i];
+    c.anim += dt;
+    if (c.fleeT > 0) { c.fleeT -= dt; c.y += c.speed * 2.2 * dt; }
+    else if (c.y < 160) { c.y += c.speed * dt; }
+    else { c.sway += c.swaySpeed * dt; c.x += Math.sin(c.sway) * 30 * dt; c.y += c.speed * 0.3 * dt; }
+    c.x = clamp(c.x, 8, W - c.w - 8);
+    if (game.invulnT <= 0 && aabb(player, c)) {
+      loseLife("TÖRMÄYS SIVILILIN!");
+      civilians.splice(i, 1);
+      continue;
+    }
+    if (c.y > H + 40) civilians.splice(i, 1);
+  }
+
+  // ===== Laatikot =====
+  for (let i = crates.length - 1; i >= 0; i--) {
+    const c = crates[i];
+    c.y += c.speed * dt;
+    c.x += Math.sin(game.time * 2 + c.sway) * 20 * dt;
+    if (c.y > H + 30) crates.splice(i, 1);
+  }
+
+  // ===== Tausta-esineet =====
+  for (let i = bgProps.length - 1; i >= 0; i--) {
+    bgProps[i].y += 46 * dt;
+    if (bgProps[i].y > H + 40) bgProps.splice(i, 1);
+  }
+  for (let i = tumbleweeds.length - 1; i >= 0; i--) {
+    const t = tumbleweeds[i];
+    t.x += t.vx * dt; t.rot += dt * 4;
+    t.y += Math.sin(game.time * 3 + t.x * 0.05) * 20 * dt;
+    if (t.x > W + 40) tumbleweeds.splice(i, 1);
+  }
+
+  // ===== Hiukkasten & tekstit =====
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 120 * dt; p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const t = texts[i];
+    t.y -= 30 * dt; t.life -= dt;
+    if (t.life <= 0) texts.splice(i, 1);
+  }
+
+  // ===== Tasonnousu =====
+  if (game.score >= game.nextLevelThreshold) levelUp();
+}
+
+function loseLife(msg) {
+  game.lives--;
+  game.invulnT = 2.5;
+  game.shakeT = 0.4; game.flashT = 0.3;
+  sfx.hurt();
+  addText(player.x - 20, player.y - 20, msg, "#ff3333", 1, 18);
+  if (game.lives <= 0) {
+    game.mode = "gameover";
+    sfx.gameover();
+  }
+}
+
+// ========== HUD ==========
+function drawHUD() {
+  // Pisteet
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(0, 0, W, 34);
+  ctx.fillStyle = "#ffd700";
+  ctx.font = "bold 15px 'Courier New', monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("PISTEET: " + game.score, 8, 15);
+  ctx.textAlign = "center";
+  ctx.fillText("TASO " + game.level, W / 2, 15);
+  // Elämät
+  ctx.textAlign = "right";
+  for (let i = 0; i < 3; i++) {
+    const hx = W - 10 - i * 18;
+    ctx.fillStyle = i < game.lives ? "#e03333" : "#3a2a2a";
+    ctx.fillRect(hx - 10, 6, 4, 4); ctx.fillRect(hx - 3, 6, 4, 4);
+    ctx.fillRect(hx - 9, 8, 9, 4); ctx.fillRect(hx - 8, 11, 7, 3); ctx.fillRect(hx - 7, 13, 5, 3);
+    ctx.fillRect(hx - 6, 15, 3, 3);
+    ctx.fillRect(hx - 6, 15, 3, 2);
+    ctx.fillRect(hx - 9, 6, 9, 2);
+    ctx.fillStyle = i < game.lives ? "#801818" : "#281818";
+    ctx.fillRect(hx - 9, 6, 2, 10);
+  }
+  // HP-palkki
+  ctx.fillStyle = "#3a2a1a"; ctx.fillRect(8, 20, 104, 8);
+  const hpPct = clamp(game.hp / game.maxHp, 0, 1);
+  ctx.fillStyle = hpPct > 0.5 ? "#4bc94b" : hpPct > 0.25 ? "#e8b53a" : "#e03c3c";
+  ctx.fillRect(10, 22, 100 * hpPct, 4);
+  ctx.fillStyle = "#e8dcc0"; ctx.font = "9px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("HP", 114, 27);
+
+  // Buff-ajastimet
+  let by = 40;
+  if (game.doubleFireT > 0) {
+    ctx.fillStyle = "#ff9c1a"; ctx.font = "bold 12px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("TULIVOIMA 2x: " + game.doubleFireT.toFixed(1) + "s", 8, by); by += 15;
+  }
+  if (game.deputyT > 0) {
+    ctx.fillStyle = "#5cb8ff"; ctx.font = "bold 12px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("APULAIS-SERIFFI: " + game.deputyT.toFixed(1) + "s", 8, by); by += 15;
+  }
+  if (game.invulnT > 0 && game.mode !== "gameover") {
+    ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("TÖRMÄYSTENSUOJA AKTIIVINEN", W / 2, H - 30);
+  }
+}
+
+// ========== RUUTUJEN PIIRTO ==========
+function drawMenu() {
+  drawBackground(0.016);
+  drawBgProps();
+  ctx.fillStyle = "rgba(20,8,4,0.55)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  const wob = Math.sin(game.time * 2) * 3;
+  ctx.fillStyle = "#e8dcc0";
+  ctx.font = "bold 44px 'Courier New', monospace";
+  ctx.fillText("WANTED", W / 2, 130 + wob);
+  ctx.fillStyle = "#ffd700";
+  ctx.font = "bold 20px 'Courier New', monospace";
+  ctx.fillText("VILLIN LÄNNEN REVOLVERISANKARI", W / 2, 165);
+  // Pyörivä sheriffitähti
+  ctx.fillStyle = "#e8c14a";
+  ctx.save(); ctx.translate(W / 2, 205); ctx.rotate(game.time); ctx.fillRect(-7, -7, 14, 14); ctx.restore();
+  ctx.fillStyle = "#e8dcc0";
+  ctx.font = "13px monospace";
+  ctx.fillText("NUOLET / WASD = liiku    VÄLILYÖNTI = ammu", W / 2, 280);
+  ctx.fillText("P = tauko", W / 2, 302);
+  ctx.fillStyle = "#9cb0c0";
+  ctx.fillText("Ampuu rosvot → pisteitä", W / 2, 340);
+  ctx.fillText("Älä ammu siviilejä (-300 pistettä)", W / 2, 360);
+  ctx.fillText("Älä törmää keneenkään (-1 elämä)", W / 2, 380);
+  ctx.fillText("★★-laatikko = apulaisseriffi + tuplatulivoima", W / 2, 400);
+  ctx.fillText("+ -laatikko = parannus +30 HP", W / 2, 420);
+  ctx.fillStyle = "#ffd700";
+  ctx.font = "bold 18px monospace";
+  ctx.globalAlpha = 0.6 + 0.4 * Math.sin(game.time * 4);
+  ctx.fillText("PAINA ENTER ALOITTAAKSESI", W / 2, 490);
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOver() {
+  ctx.fillStyle = "rgba(10,4,2,0.7)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#e03c3c";
+  ctx.font = "bold 42px 'Courier New', monospace";
+  ctx.fillText("PELI OHI", W / 2, 220);
+  ctx.fillStyle = "#e8dcc0";
+  ctx.font = "bold 20px monospace";
+  ctx.fillText("PISTEET: " + game.score, W / 2, 280);
+  ctx.fillText("TASO: " + game.level, W / 2, 310);
+  ctx.fillStyle = "#ffd700";
+  ctx.globalAlpha = 0.6 + 0.4 * Math.sin(game.time * 4);
+  ctx.font = "bold 16px monospace";
+  ctx.fillText("PAINA ENTER UUDELLEEN", W / 2, 380);
+  ctx.globalAlpha = 1;
+}
+
+// ========== PÄÄSILMUKKA ==========
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  update(dt);
+
+  ctx.save();
+  if (game.shakeT > 0) {
+    ctx.translate(rand(-5, 5) * game.shakeT * 4, rand(-5, 5) * game.shakeT * 4);
+  }
+
+  drawBackground(game.mode === "play" ? dt : 0.016);
+  drawBgProps();
+
+  if (game.mode === "menu") { drawMenu(); ctx.restore(); requestAnimationFrame(frame); return; }
+
+  crates.forEach(drawCrate);
+  civilians.forEach(drawCivilian);
+  bandits.forEach(drawBandit);
+  drawDeputy();
+  drawPlayer();
+
+  // Luodit
+  playerBullets.forEach(b => {
+    ctx.fillStyle = "#ffe9a0";
+    ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h === 10 ? 8 : b.h);
+    ctx.fillStyle = "#c89428"; ctx.fillRect(Math.round(b.x), Math.round(b.y) + 8, b.w, 3);
+  });
+  banditBullets.forEach(b => {
+    ctx.fillStyle = "#ff5533";
+    ctx.fillRect(Math.round(b.x), Math.round(b.y), b.w, b.h);
+    if (b.dmg > 12) { ctx.fillStyle = "#881515"; ctx.fillRect(Math.round(b.x) - 1, Math.round(b.y) - 1, b.w + 2, b.h + 2); }
+  });
+
+  // Hiukkaset
+  particles.forEach(p => {
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = clamp(p.life * 2, 0, 1);
+    ctx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
+  });
+  ctx.globalAlpha = 1;
+
+  // Leijuvat tekstit
+  texts.forEach(t => {
+    ctx.globalAlpha = clamp(t.life, 0, 1);
+    ctx.fillStyle = t.color;
+    ctx.font = "bold " + t.size + "px 'Courier New', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(t.text, t.x, t.y);
+  });
+  ctx.globalAlpha = 1;
+
+  drawHUD();
+
+  if (game.flashT > 0) {
+    ctx.fillStyle = "rgba(255,60,40," + (game.flashT * 0.6) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (game.doubleFireT > 0) {
+    ctx.fillStyle = "rgba(255,156,26," + (0.06 + 0.04 * Math.sin(game.time * 8)) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (game.mode === "pause") {
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#e8dcc0";
+    ctx.font = "bold 30px monospace"; ctx.textAlign = "center";
+    ctx.fillText("TAUKO", W / 2, H / 2);
+    ctx.font = "14px monospace";
+    ctx.fillText("P = jatka", W / 2, H / 2 + 30);
+  }
+  if (game.mode === "gameover") drawGameOver();
+
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+
+// Apuritaulukon siviilien alustus
+for (let i = 0; i < 4; i++) { spawnBgProp(); bgProps[i].y = rand(H * 0.5, H - 40); }
+spawnTumbleweed();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
